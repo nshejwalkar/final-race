@@ -5,3 +5,4 @@ pure_pursuit_node:
 
     # Pose source: use /ego_racecar/odom for sim, /pf/pose/odom with particle filter
     # pose_topic is set in ControllerConfig in the node; override here if needed
+

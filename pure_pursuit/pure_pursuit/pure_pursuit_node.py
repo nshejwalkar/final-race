@@ -25,7 +25,7 @@ class ControllerConfig:
     # ---------------- Topics / frames ----------------
     # pose_topic: str = '/pf/pose/odom'     # real-car localization source
     pose_topic: str = '/ego_racecar/odom'   # sim
-    drive_topic: str = '/drive'
+    drive_topic: str = '/drive_pp'
     marker_topic: str = '/pure_pursuit/markers'
     global_frame: str = 'map'
     publish_markers: bool = True
@@ -56,9 +56,9 @@ class ControllerConfig:
 
     # ---------------- Speed logic ----------------
     use_waypoint_velocity: bool = True
-    nominal_speed: float = 1.50
+    nominal_speed: float = 2.50
     min_speed: float = 0.60
-    max_speed: float = 2.00
+    max_speed: float = 4.00
     curve_slowdown_gain: float = 1.50
     curve_speed_power: float = 1.00
     max_accel: float = 1.20
@@ -68,6 +68,7 @@ class ControllerConfig:
     control_rate: float = 20.0
     pose_timeout: float = 0.30
     stop_on_path_end: bool = False
+
 
 
 CFG = ControllerConfig()
@@ -85,6 +86,7 @@ class PurePursuitNode(Node):
         # Allow key config to be overridden from a YAML param file or launch arg
         self.declare_parameter('waypoints_path', cfg.waypoints_path)
         self.declare_parameter('pose_topic', cfg.pose_topic)
+
         wp = self.get_parameter('waypoints_path').value
         if wp:
             self.cfg.waypoints_path = wp
@@ -106,6 +108,7 @@ class PurePursuitNode(Node):
         self.last_goal_idx = 0
         self.warned_stale = False
         self.warned_lost = False
+
 
         # ---------------- Path ----------------
         self.waypoints_xy, self.waypoint_speeds, self.waypoint_lookaheads = \
@@ -496,7 +499,6 @@ class PurePursuitNode(Node):
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
-
     # ==================================================================
     # Publishers
     # ==================================================================
@@ -572,7 +574,7 @@ def main(args=None):
         try:
             from ament_index_python.packages import get_package_share_directory
             share = get_package_share_directory('pure_pursuit')
-            CFG.waypoints_path = os.path.join(share, 'waypoints', 'race2.csv')
+            CFG.waypoints_path = os.path.join(share, 'waypoints', 'levine.csv')
         except Exception:
             pass
 
