@@ -1,0 +1,7 @@
+pure_pursuit_node:
+  ros__parameters:
+    # Override waypoints path here (leave empty to use the installed default CSV)
+    waypoints_path: ''
+
+    # Pose source: use /ego_racecar/odom for sim, /pf/pose/odom with particle filter
+    # pose_topic is set in ControllerConfig in the node; override here if needed

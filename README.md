@@ -1,76 +1,84 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/OSQL04FA)
-# Lab 3: Wall Following
+# RoboRacer Workspace
 
-## I. Learning Goals
+## Quick Start
 
-- PID Controllers
-- Driving the car autonomously via Wall Following
+Add these aliases to your shell (already in `.bashrc` / `.zshrc`):
 
-## II. Review of PID in the time domain
+```bash
+alias setup_fast='source ~/Neel/roboracer_ws/.venv/bin/activate && source /opt/ros/humble/setup.bash && cd ~/Neel/roboracer_ws && ([ ! -d install ] && colcon build); source ~/Neel/roboracer_ws/install/setup.bash'
+alias start_sim='ros2 launch f1tenth_gym_ros gym_bridge_launch.py'
+```
 
-A PID controller is a way to maintain certain parameters of a system around a specified set point. PID controllers are used in a variety of applications requiring closed-loop control, such as in the VESC speed controller on your car.
+### Every terminal session
 
-The general equation for a PID controller in the time domain, as discussed in lecture, is as follows:
+```bash
+setup_fast
+```
 
-$$ u(t)=K_{p}e(t)+K_{i}\int_{0}^{t}e(t^{\prime})dt^{\prime}+K_{d}\frac{d}{dt}(e(t)) $$
+### Run the simulator
 
-Here, $K_p$, $K_i$, and $K_d$ are constants that determine how much weight each of the three components (proportional, integral, derivative) contribute to the control output $u(t)$. $u(t)$ in our case is the steering angle we want the car to drive at. The error term $e(t)$ is the difference between the set point and the parameter we want to maintain around that set point.
+```bash
+start_sim
+```
 
-## III. Wall Following
+Open Foxglove at `http://localhost:8765` → import layout from `f1tenth_gym_ros/config/foxglove/gym_bridge_foxglove.json`.
 
-In the context of our car, the desired distance to the wall should be our set point for our controller, which means our error is the difference between the desired and actual distance to the wall. This raises an important question: how do we measure the distance to the wall, and at what point in time? One option would simply be to consider the distance to the right wall at the current time $t$ (let's call it $D_t$). Let's consider a generic orientation of the car with respect to the right wall and suppose the angle between the car's x-axis and the axis in the direction along the wall is denoted by $\alpha$. We will obtain two laser scans (distances) to the wall:
-one 90 degrees to the right of the car's x-axis (beam b in the figure), and one (beam a) at an angle $\theta$ ( $0<\theta\leq70$ degrees) to the first beam. Suppose these two laser scans return distances a and b, respectively.
+### Run a controller
 
-![fig1](img/wall_following_lab_figure_1.png)
+Wall follower:
+```bash
+ros2 run wall_follow wall_follow_node
+```
 
-*Figure 1: Distance and orientation of the car relative to the wall*
+Pure pursuit (requires recorded waypoints):
+```bash
+ros2 launch pure_pursuit pure_pursuit_launch.py
+# or with a specific CSV:
+ros2 launch pure_pursuit pure_pursuit_launch.py waypoints_path:=/abs/path/to/waypoints.csv
+```
 
-Using the two distances $a$ and $b$ from the laser scan, the angle $\theta$ between the laser scans, and some trigonometry, we can express $\alpha$ as
+Particle filter localizer (run alongside pure pursuit for real-car localization):
+```bash
+ros2 launch particle_filter localize_launch.py
+```
 
-$$ \alpha=\mbox{tan}^{-1}\left(\frac{a\mbox{cos}(\theta)-b}{a\mbox{sin}(\theta)}\right) $$
+### Record / edit waypoints
 
-We can then express $D_t$ as 
+```bash
+# Edit default race2.csv on my_map1
+python waypoint_editor.py
 
-$$ D_t=b\mbox{cos}(\alpha) $$
+# Create a new waypoints file seeded from the latest existing one
+python waypoint_editor.py --csv new_track.csv
 
-to get the current distance between the car and the right wall. What's our error term $e(t)$, then? It's simply the difference between the desired distance and actual distance! For example, if our desired distance is 1 meter from the wall, then $e(t)$ becomes $1-D_t$.
-	
-However, we have a problem on our hands. Remember that this is a race: your car will be traveling at a high speed and therefore will have a non-instantaneous response to whatever speed and servo control you give to it. If we simply use the current distance to the wall, we might end up turning too late, and the car may crash. Therefore, we must look to the future and project the car ahead by a certain lookahead distance (let's call it $L$). Our new distance $D_{t+1}$ will then be
+# Use a different map
+python waypoint_editor.py --csv race2.csv --map f1tenth_gym_ros/maps/my_map1.yaml
+```
 
-$$D_{t+1}=D_t+L\mbox{sin}(\alpha)$$
+After saving in the editor, rebuild to update the installed copy:
+```bash
+colcon build --packages-select pure_pursuit && source install/setup.bash
+```
 
-![fig1](img/wall_following_lab_figure_2.png)
+> **Tip:** Run `colcon build --symlink-install` once to skip rebuilds when editing waypoints — the install folder will symlink directly to the source CSVs.
 
-*Figure 2: Finding the future distance from the car to the wall*
+---
 
-We're almost there. Our control algorithm gives us a steering angle for the VESC, but we would also like to slow the car down around corners for safety. We can compute the speed in a step-like fashion based on the steering angle, or equivalently the calculated error, so that as the angle exceeds progressively larger amounts, the speed is cut in discrete increments. For this lab, a good starting point for the speed control algorithm is:
+## Packages
 
-- If the steering angle is between 0 degrees and 10 degrees, the car should drive at 1.5 meters per second.
-- If the steering angle is between 10 degrees and 20 degrees, the speed should be 1.0 meters per second.
-- Otherwise, the speed should be 0.5 meters per second.
+| Package | Purpose |
+|---|---|
+| `f1tenth_gym_ros` | Physics simulator bridge + Foxglove visualization |
+| `wall_follow` | PID wall-following controller |
+| `pure_pursuit` | Waypoint-tracking pure pursuit controller |
+| `particle_filter` | MCL localization (real car) |
 
-So, in summary, here's what we need to do:
+## Sim config
 
-1. Obtain two laser scans (distances) a and b.
-2. Use the distances a and b to calculate the angle $\alpha$ between the car's $x$-axis and the right wall.
-3. Use $\alpha$ to find the current distance $D_t$ to the car, and then $\alpha$ and $D_t$ to find the estimated future distance $D_{t+1}$ to the wall.
-4. Run $D_{t+1}$ through the PID algorithm described above to get a steering angle.
-5. Use the steering angle you computed in the previous step to compute a safe driving speed.
-6. Publish the steering angle and driving speed to the `/drive` topic in simulation.
+Edit `f1tenth_gym_ros/config/sim.yaml` to change:
+- `map_path` — which map to load
+- `num_agent` — 1 or 2 cars
+- `sx` / `sy` / `stheta` — ego starting pose
+- `sx1` / `sy1` / `stheta1` — opponent starting pose
 
-## IV. Implementation
-
-Implement wall following to make the car drive autonomously around the Levine Hall map. Follow the inner walls of Levine. Which means follow left if the car is going counter-clockwise in the loop. (The first race we run will be counter-clockwise). You can implement this node in either C++ or Python.
-
-## V. Deliverables and Submission
-
-**Deliverable 1**: After you're finished, update the entire skeleton package directory with your `wall_follow` package and directly commit and push to the repo Github classroom created for you. Your commited code should start and run in simulation smoothly.
-
-**Deliverable 2**: Make a screen cast of running your wall following node in the simulation. Include a link to the video on YouTube in **`SUBMISSION.md`**.
-
-## VI: Grading Rubric
-
-- Compilation: **10** Points
-- Implemented PID: **40** Points
-- Tuned PID: **40** Points
-- Video: **10** Points
+After any config change: `colcon build --packages-select f1tenth_gym_ros && source install/setup.bash`
