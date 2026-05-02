@@ -319,12 +319,17 @@ class RRTStarNode(Node):
 
         need_avoidance = blocked or not self.raceline_clear()
         if need_avoidance:
+            if not self.in_avoidance_mode:
+                reason = "blocked" if blocked else "raceline not clear"
+                self.get_logger().info(f'[MODE] Switching to RRT* avoidance ({reason})')
             self.in_avoidance_mode = True
             self.avoidance_ttl = self.replan_hysteresis_cycles
         elif self.avoidance_ttl > 0:
             self.avoidance_ttl -= 1
             self.in_avoidance_mode = self.avoidance_ttl > 0
         else:
+            if self.in_avoidance_mode:
+                self.get_logger().info('[MODE] Switching back to pure pursuit')
             self.in_avoidance_mode = False
 
         if self.in_avoidance_mode:
