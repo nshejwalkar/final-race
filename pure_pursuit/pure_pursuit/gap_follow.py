@@ -138,10 +138,10 @@ class ReactiveFollowGap(Node):
             blob_size = e - s
             
             # # Reject blobs that are too small (noise) or too wide (wall)
-            # if blob_size < 5:
-            #     continue
-            # if blob_size > 30:  # wider than ~15deg of close returns = probably wall
-            #     continue
+            if blob_size < 5:
+                continue
+            if blob_size > 30:  # wider than ~15deg of close returns = probably wall
+                continue
             
             # Check if there's free space on at least one side
             # Look at the 5 beams just outside the blob
