@@ -4,11 +4,13 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+import tf2_ros
 
 import numpy as np
 from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Bool
+from nav_msgs.msg import OccupancyGrid
 
 
 class ReactiveFollowGap(Node):
@@ -80,10 +82,21 @@ class ReactiveFollowGap(Node):
         self.trigger_dist = 1.5   # switch to gap follow when obstacle this close
         self.clear_dist = 1.5     # switch back to PP only when this far
         self.obstacle_state = False
+        self.map_topic = '/map'
+        self.wall_radius_cells = 4
+        self.wall_occupancy_thresh = 50
 
         # State
         self._prev_steer = 0.0
         self.last_pp_steer = 0.0
+        self.map_grid = None
+        self.map_resolution = None
+        self.map_origin = None
+        self.map_width = None
+        self.map_height = None
+        self.map_frame = None
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # ---------------- ROS I/O ----------------
         self.scan_sub = self.create_subscription(
@@ -98,12 +111,26 @@ class ReactiveFollowGap(Node):
             self._on_pp_drive,
             10,
         )
+        self.map_sub = self.create_subscription(
+            OccupancyGrid,
+            self.map_topic,
+            self._on_map,
+            1,
+        )
         self.obstacle_pub = self.create_publisher(Bool, '/obstacle_ahead', 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, drive_topic, 10)
 
         self.get_logger().info("ReactiveFollowGap node started: Follow-the-Gap is running (with Disparity Extender).")
 
-    def detect_obstacle_blob(self, ranges, angles, cone_center: float, dist_thresh: float) -> bool:
+    def detect_obstacle_blob(
+        self,
+        ranges,
+        angles,
+        cone_center: float,
+        dist_thresh: float,
+        scan_frame: str,
+        scan_stamp,
+    ) -> bool:
         """Detect a discrete obstacle (not a wall) in the steering-biased front cone."""
 
         # 1. Take only front cone (biased by steering)
@@ -115,6 +142,22 @@ class ReactiveFollowGap(Node):
         front_ranges = ranges[front_mask].copy()
         front_ranges[~np.isfinite(front_ranges)] = 100.0  # treat invalid as far
         front_ranges[front_ranges <= 0.0] = 100.0
+
+        if self._map_ready():
+            transform = self._lookup_map_transform(scan_frame, scan_stamp)
+            if transform is not None:
+                tx, ty, yaw = transform
+                front_idx = np.flatnonzero(front_mask)
+                for local_i, scan_i in enumerate(front_idx):
+                    r = float(front_ranges[local_i])
+                    if r >= dist_thresh:
+                        continue
+                    x_l = r * math.cos(float(angles[scan_i]))
+                    y_l = r * math.sin(float(angles[scan_i]))
+                    x_w = tx + math.cos(yaw) * x_l - math.sin(yaw) * y_l
+                    y_w = ty + math.sin(yaw) * x_l + math.cos(yaw) * y_l
+                    if self._is_wall_return(x_w, y_w):
+                        front_ranges[local_i] = 100.0
         
         # 2. Find continuous "close" segments (potential obstacles)
         close_mask = front_ranges < dist_thresh
@@ -156,6 +199,65 @@ class ReactiveFollowGap(Node):
             if left_clear or right_clear:
                 return True  # Real obstacle: close blob with free space beside it
         
+        return False
+
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        if msg.info.width == 0 or msg.info.height == 0:
+            return
+        grid = np.array(msg.data, dtype=np.int16)
+        if grid.size != msg.info.width * msg.info.height:
+            return
+        self.map_grid = grid.reshape((msg.info.height, msg.info.width))
+        self.map_resolution = float(msg.info.resolution)
+        self.map_origin = (float(msg.info.origin.position.x), float(msg.info.origin.position.y))
+        self.map_width = int(msg.info.width)
+        self.map_height = int(msg.info.height)
+        self.map_frame = msg.header.frame_id
+
+    def _map_ready(self) -> bool:
+        return (
+            self.map_grid is not None
+            and self.map_resolution is not None
+            and self.map_origin is not None
+            and self.map_width is not None
+            and self.map_height is not None
+            and self.map_frame
+        )
+
+    def _lookup_map_transform(self, scan_frame: str, scan_stamp):
+        if not self.map_frame or not scan_frame:
+            return None
+        try:
+            t = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                scan_frame,
+                rclpy.time.Time.from_msg(scan_stamp),
+                timeout=rclpy.duration.Duration(seconds=0.05),
+            )
+        except Exception:
+            return None
+        q = t.transform.rotation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        return (float(t.transform.translation.x), float(t.transform.translation.y), float(yaw))
+
+    def _is_wall_return(self, x_w: float, y_w: float) -> bool:
+        if not self._map_ready():
+            return False
+        ox, oy = self.map_origin
+        res = self.map_resolution
+        cx = int((x_w - ox) / res)
+        cy = int((y_w - oy) / res)
+        radius = int(self.wall_radius_cells)
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                ix = cx + dx
+                iy = cy + dy
+                if 0 <= ix < self.map_width and 0 <= iy < self.map_height:
+                    if self.map_grid[iy, ix] >= self.wall_occupancy_thresh:
+                        return True
         return False
     def preprocess_lidar(self, ranges: np.ndarray, range_max: float) -> np.ndarray:
         """Preprocess the LiDAR scan array.
@@ -295,8 +397,22 @@ class ReactiveFollowGap(Node):
         cone_center = float(self.last_pp_steer)
 
         # --- obstacle detection ---
-        detected = self.detect_obstacle_blob(ranges, angles, cone_center, self.trigger_dist)
-        cleared = self.detect_obstacle_blob(ranges, angles, cone_center, self.clear_dist)
+        detected = self.detect_obstacle_blob(
+            ranges,
+            angles,
+            cone_center,
+            self.trigger_dist,
+            data.header.frame_id,
+            data.header.stamp,
+        )
+        cleared = self.detect_obstacle_blob(
+            ranges,
+            angles,
+            cone_center,
+            self.clear_dist,
+            data.header.frame_id,
+            data.header.stamp,
+        )
 
         if detected:
             self.obstacle_state = True
