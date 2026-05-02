@@ -3,10 +3,13 @@
 F1TENTH Interactive Waypoint Editor
 ====================================
 Overlays waypoints from a CSV onto a PGM map image.
-Three editing modes (seamlessly linked — edits carry between modes):
-  - Points Mode:     drag individual waypoints, bulk edit speed/lookahead
-  - Catmull-Rom Mode: fit a C-R spline through control points, drag to reshape
-  - Bezier Mode:     cubic Bezier with tangent handles for precise curve shaping
+Two editing modes:
+  - Points Mode:      drag individual waypoints, bulk edit speed/lookahead
+  - Catmull-Rom Mode: fit a C-R spline through a SELECTED PORTION of the
+                      raceline (highlight points first, then click Catmull-Rom).
+                      Drag CPs to reshape, slide CP count to simplify.
+                      Switch back to Points to commit the spline output to the
+                      raceline (only the highlighted segment is replaced).
 
 Usage:
     python waypoint_editor.py                          # defaults: pure_pursuit/waypoints/race2.csv + f1tenth_gym_ros/maps/my_map1.yaml
@@ -54,6 +57,22 @@ def parse_pgm(pgm_path: str):
     return width, height, maxval, data
 
 
+def _is_png(path: str) -> bool:
+    with open(path, "rb") as f:
+        return f.read(8) == b"\x89PNG\r\n\x1a\n"
+
+
+def parse_png_dimensions(path: str):
+    """Read width/height from a PNG IHDR chunk without PIL."""
+    with open(path, "rb") as f:
+        f.read(8)   # PNG signature
+        f.read(4)   # IHDR length
+        f.read(4)   # 'IHDR'
+        w = struct.unpack(">I", f.read(4))[0]
+        h = struct.unpack(">I", f.read(4))[0]
+    return w, h
+
+
 def load_pgm_as_png_base64(pgm_path: str) -> str:
     if HAS_PIL:
         img = Image.open(pgm_path).convert("L")
@@ -61,6 +80,9 @@ def load_pgm_as_png_base64(pgm_path: str) -> str:
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
     else:
+        if _is_png(pgm_path):
+            with open(pgm_path, "rb") as f:
+                return base64.b64encode(f.read()).decode()
         width, height, maxval, data = parse_pgm(pgm_path)
         import zlib
 
@@ -189,13 +211,13 @@ canvas { position: absolute; top: 0; left: 0; }
 
 #panel {
     width: 300px; background: #16213e; border-left: 1px solid #0f3460;
-    display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden;
+    display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
 }
 #panel h2 {
     font-size: 14px; padding: 12px 14px 8px; color: #e94560;
     border-bottom: 1px solid #0f3460;
 }
-#panel-content { flex: 1; overflow-y: auto; padding: 10px 14px; }
+#panel-content { padding: 10px 14px; }
 .field { margin-bottom: 10px; }
 .field label {
     display: block; font-size: 11px; color: #888; margin-bottom: 3px;
@@ -221,7 +243,14 @@ canvas { position: absolute; top: 0; left: 0; }
 .wp-item.selected { background: #533483; color: #fff; }
 
 .section-box {
-    border-top: 1px solid #0f3460; padding: 10px 14px; flex-shrink: 0;
+    border-top: 1px solid #0f3460; padding: 10px 14px; margin-top: 8px;
+}
+.multiplier-block {
+    margin-top: 12px; padding-top: 10px; border-top: 1px dashed #0f3460;
+}
+.multiplier-block .field-label {
+    display: block; font-size: 11px; color: #888; margin-bottom: 6px;
+    text-transform: uppercase; letter-spacing: 0.5px;
 }
 .section-box h3 { font-size: 12px; color: #e94560; margin-bottom: 8px; }
 .section-box .field { margin-bottom: 8px; }
@@ -261,7 +290,6 @@ canvas { position: absolute; top: 0; left: 0; }
     <div style="flex:1"></div>
     <button class="btn-mode" id="btn-points" onclick="setMode('points')">Points</button>
     <button class="btn-mode" id="btn-spline" onclick="setMode('spline')">Catmull-Rom</button>
-    <button class="btn-mode" id="btn-bezier" onclick="setMode('bezier')">Bezier</button>
     <span style="width:1px;height:24px;background:#0f3460"></span>
     <button class="btn-secondary" onclick="resetView()">Reset View</button>
     <button class="btn-undo" onclick="undo()">Undo (Ctrl+Z)</button>
@@ -291,39 +319,31 @@ canvas { position: absolute; top: 0; left: 0; }
                     <div class="field"><label>Lookahead (m)</label><input type="number" step="0.05" min="0.1" id="sel-la" onchange="updateSingleField('lookahead')"></div>
                 </div>
                 <div id="multi-sel" style="display:none"><div class="wp-list" id="sel-list"></div></div>
-            </div>
-            <div class="section-box">
-                <h3>Bulk Edit Selected</h3>
-                <div class="field"><label>Set Speed (m/s)</label><input type="number" step="0.05" min="0" id="bulk-speed" placeholder="leave blank to keep"></div>
-                <div class="field"><label>Set Lookahead (m)</label><input type="number" step="0.05" min="0.1" id="bulk-la" placeholder="leave blank to keep"></div>
-                <button class="btn-save" onclick="applyBulk()">Apply to Selected</button>
-                <button class="btn-secondary" style="margin-top:4px" onclick="deleteSelected()">Delete Selected</button>
+                <div class="section-box">
+                    <h3>Bulk Edit Selected</h3>
+                    <div class="field"><label>Set Speed (m/s)</label><input type="number" step="0.05" min="0" id="bulk-speed" placeholder="leave blank to keep"></div>
+                    <div class="field"><label>Set Lookahead (m)</label><input type="number" step="0.05" min="0.1" id="bulk-la" placeholder="leave blank to keep"></div>
+                    <button class="btn-save" onclick="applyBulk()">Apply to Selected</button>
+                    <div class="multiplier-block">
+                        <span class="field-label">Multiply Selected By</span>
+                        <div class="field"><label>Speed Multiplier</label><input type="number" step="0.01" min="0" id="bulk-speed-mul" placeholder="e.g. 0.9 (leave blank for no change)"></div>
+                        <div class="field"><label>Lookahead Multiplier</label><input type="number" step="0.01" min="0" id="bulk-la-mul" placeholder="e.g. 1.1 (leave blank for no change)"></div>
+                        <button class="btn-secondary" onclick="applyBulkMultiplier()">Apply Multipliers</button>
+                    </div>
+                    <button class="btn-secondary" style="margin-top:8px" onclick="deleteSelected()">Delete Selected</button>
+                </div>
             </div>
         </div>
 
         <!-- ====== SPLINE MODE PANEL ====== -->
         <div id="spline-panel" style="display:none">
             <h2>Spline Controls</h2>
-            <div id="spline-panel-content" style="flex:1;overflow-y:auto;padding:10px 14px;">
+            <div id="spline-panel-content" style="padding:10px 14px;">
                 <div class="field">
                     <label>Control Points</label>
                     <div class="range-row">
                         <input type="range" id="cp-count" min="6" max="100" value="25" oninput="onCpCountChange()">
                         <span id="cp-count-val">25</span>
-                    </div>
-                </div>
-                <div class="field">
-                    <label>Output Waypoints</label>
-                    <div class="range-row">
-                        <input type="range" id="wp-density" min="50" max="1000" step="10" value="400" oninput="onWpDensityChange()">
-                        <span id="wp-density-val">400</span>
-                    </div>
-                </div>
-                <div class="field">
-                    <label>Spline Tension (0=loose, 1=tight)</label>
-                    <div class="range-row">
-                        <input type="range" id="spline-tension" min="0" max="100" value="50" oninput="onTensionChange()">
-                        <span id="tension-val">0.50</span>
                     </div>
                 </div>
                 <hr style="border-color:#0f3460;margin:12px 0">
@@ -344,61 +364,20 @@ canvas { position: absolute; top: 0; left: 0; }
                 <div id="cp-multi-sel" style="display:none">
                     <div class="wp-list" id="cp-list"></div>
                 </div>
-            </div>
-            <div class="section-box">
-                <h3>Bulk Edit Control Points</h3>
-                <div class="field"><label>Set Speed (m/s)</label><input type="number" step="0.05" min="0" id="cp-bulk-speed" placeholder="leave blank to keep"></div>
-                <div class="field"><label>Set Lookahead (m)</label><input type="number" step="0.05" min="0.1" id="cp-bulk-la" placeholder="leave blank to keep"></div>
-                <button class="btn-save" onclick="applyCpBulk()">Apply to Selected</button>
-                <button class="btn-secondary" style="margin-top:4px" onclick="deleteCpSelected()">Delete Selected CPs</button>
-                <button class="btn-mode" style="margin-top:8px" onclick="commitAndGoPoints()">Commit & Edit Points</button>
-            </div>
-        </div>
-
-        <!-- ====== BEZIER MODE PANEL ====== -->
-        <div id="bezier-panel" style="display:none">
-            <h2>Bezier Controls</h2>
-            <div style="flex:1;overflow-y:auto;padding:10px 14px;">
-                <div class="field">
-                    <label>Anchor Points</label>
-                    <div class="range-row">
-                        <input type="range" id="bz-count" min="4" max="80" value="20" oninput="onBzCountChange()">
-                        <span id="bz-count-val">20</span>
+                <div class="section-box">
+                    <h3>Bulk Edit Control Points</h3>
+                    <div class="field"><label>Set Speed (m/s)</label><input type="number" step="0.05" min="0" id="cp-bulk-speed" placeholder="leave blank to keep"></div>
+                    <div class="field"><label>Set Lookahead (m)</label><input type="number" step="0.05" min="0.1" id="cp-bulk-la" placeholder="leave blank to keep"></div>
+                    <button class="btn-save" onclick="applyCpBulk()">Apply to Selected</button>
+                    <div class="multiplier-block">
+                        <span class="field-label">Multiply Selected By</span>
+                        <div class="field"><label>Speed Multiplier</label><input type="number" step="0.01" min="0" id="cp-bulk-speed-mul" placeholder="e.g. 0.9 (leave blank for no change)"></div>
+                        <div class="field"><label>Lookahead Multiplier</label><input type="number" step="0.01" min="0" id="cp-bulk-la-mul" placeholder="e.g. 1.1 (leave blank for no change)"></div>
+                        <button class="btn-secondary" onclick="applyCpMultiplier()">Apply Multipliers</button>
                     </div>
+                    <button class="btn-secondary" style="margin-top:8px" onclick="deleteCpSelected()">Delete Selected CPs</button>
+                    <button class="btn-mode" style="margin-top:8px" onclick="commitAndGoPoints()">Commit & Edit Points</button>
                 </div>
-                <div class="field">
-                    <label>Output Waypoints</label>
-                    <div class="range-row">
-                        <input type="range" id="bz-density" min="50" max="1000" step="10" value="400" oninput="onBzDensityChange()">
-                        <span id="bz-density-val">400</span>
-                    </div>
-                </div>
-                <div class="field" style="margin-top:4px">
-                    <label><input type="checkbox" id="bz-smooth" checked onchange="onBzSmoothToggle()"> Smooth handles (mirror tangents)</label>
-                </div>
-                <hr style="border-color:#0f3460;margin:12px 0">
-                <div id="bz-no-sel" style="color:#666;font-size:12px;padding:6px 0;">
-                    Click an anchor (square) to select.<br>
-                    Drag <b>handles</b> (circles) to adjust tangents.<br>
-                    <b>Double-click</b> to add an anchor.<br>
-                    <b>Delete</b> to remove selected anchors.
-                </div>
-                <div id="bz-single-sel" style="display:none">
-                    <div class="field"><label>Anchor Index</label><input type="text" id="bz-idx" readonly></div>
-                    <div class="field"><label>X (meters)</label><input type="number" step="0.001" id="bz-x" onchange="updateBzField('x')"></div>
-                    <div class="field"><label>Y (meters)</label><input type="number" step="0.001" id="bz-y" onchange="updateBzField('y')"></div>
-                    <div class="field"><label>Speed (m/s)</label><input type="number" step="0.05" min="0" id="bz-speed" onchange="updateBzField('speed')"></div>
-                    <div class="field"><label>Lookahead (m)</label><input type="number" step="0.05" min="0.1" id="bz-la" onchange="updateBzField('lookahead')"></div>
-                </div>
-                <div id="bz-multi-sel" style="display:none"><div class="wp-list" id="bz-list"></div></div>
-            </div>
-            <div class="section-box">
-                <h3>Bulk Edit Anchors</h3>
-                <div class="field"><label>Set Speed (m/s)</label><input type="number" step="0.05" min="0" id="bz-bulk-speed" placeholder="leave blank to keep"></div>
-                <div class="field"><label>Set Lookahead (m)</label><input type="number" step="0.05" min="0.1" id="bz-bulk-la" placeholder="leave blank to keep"></div>
-                <button class="btn-save" onclick="applyBzBulk()">Apply to Selected</button>
-                <button class="btn-secondary" style="margin-top:4px" onclick="deleteBzSelected()">Delete Selected Anchors</button>
-                <button class="btn-mode" style="margin-top:8px" onclick="commitAndGoPoints()">Commit & Edit Points</button>
             </div>
         </div>
 
@@ -450,78 +429,101 @@ let redoStack = [];
 const MAX_UNDO = 50;
 
 // =====================================================================
-//  MODE: 'points' | 'spline' | 'bezier'
+//  MODE: 'points' | 'spline'
 // =====================================================================
 let mode = 'points';
 
 // Spline state
+// splineRange = {start, end} indices into waypoints[] being edited
+//   (inclusive both ends). null when not in spline mode.
+let splineRange = null;
+let splineOriginalSegment = [];   // deep copy of waypoints[start..end] at mode-entry
+let splinePhantomBefore = null;   // waypoint just before start (for tangent at start)
+let splinePhantomAfter = null;    // waypoint just after end   (for tangent at end)
 let controlPoints = [];
 let splineCurve = [];
 let splineWaypoints = [];
 let cpSelected = new Set();
 let cpHoveredIdx = -1;
-let splineTension = 0.5;
-let wpDensity = 400;
-
-// Bezier state
-// Each anchor: {x, y, hix, hiy, hox, hoy, speed, lookahead}
-//   hix/hiy = handle-in offset (relative to anchor)
-//   hox/hoy = handle-out offset (relative to anchor)
-let bezierAnchors = [];
-let bezierCurve = [];       // dense preview
-let bezierWaypoints = [];   // output
-let bzSelected = new Set();
-let bzHoveredIdx = -1;
-let bzHoveredType = null;   // 'anchor' | 'handle-in' | 'handle-out'
-let bzDragType = null;      // what we're dragging in bezier mode
-let bzDragIdx = -1;
-let bzSmooth = true;
-let bzDensity = 400;
 
 function setMode(m) {
+    // ---- Spline mode requires a selection of at least 2 waypoints ----
+    if (m === 'spline' && mode !== 'spline') {
+        if (selected.size < 2) {
+            showToast('Select at least 2 waypoints first to convert that segment to a spline.');
+            return;
+        }
+    }
+
     // ---- Commit current curve → waypoints before leaving ----
+    if (mode === 'spline' && m !== 'spline' && splineRange) pushUndo();
     commitCurveToWaypoints();
 
-    const prevMode = mode;
     mode = m;
 
     document.getElementById('btn-points').classList.toggle('active', m === 'points');
     document.getElementById('btn-spline').classList.toggle('active', m === 'spline');
-    document.getElementById('btn-bezier').classList.toggle('active', m === 'bezier');
     document.getElementById('points-panel').style.display = m === 'points' ? '' : 'none';
     document.getElementById('spline-panel').style.display = m === 'spline' ? '' : 'none';
-    document.getElementById('bezier-panel').style.display = m === 'bezier' ? '' : 'none';
-    const names = {points: 'Points', spline: 'Catmull-Rom', bezier: 'Bezier'};
+    const names = {points: 'Points', spline: 'Catmull-Rom'};
     document.getElementById('status-mode').textContent = `Mode: ${names[m]}`;
 
-    // ---- Re-fit curve from (possibly updated) waypoints ----
     if (m === 'spline') {
-        generateControlPoints(parseInt(document.getElementById('cp-count').value));
-    }
-    if (m === 'bezier') {
-        generateBezierAnchors(parseInt(document.getElementById('bz-count').value));
+        // Determine contiguous range from selection (min..max).
+        const idxs = [...selected].sort((a, b) => a - b);
+        const start = idxs[0];
+        const end = idxs[idxs.length - 1];
+        splineRange = {start, end};
+        splineOriginalSegment = waypoints.slice(start, end + 1).map(p => ({...p}));
+        // Phantom endpoints: use neighbors from the unedited portion of the closed loop
+        const n = waypoints.length;
+        splinePhantomBefore = {...waypoints[(start - 1 + n) % n]};
+        splinePhantomAfter = {...waypoints[(end + 1) % n]};
+        // Initialize control points = the entire segment (lossless on entry)
+        controlPoints = splineOriginalSegment.map(p => ({...p}));
+        const el = document.getElementById('cp-count');
+        el.max = controlPoints.length;
+        el.min = Math.min(2, controlPoints.length);
+        el.value = controlPoints.length;
+        document.getElementById('cp-count-val').textContent = controlPoints.length;
+        regenerateSpline();
+    } else {
+        splineRange = null;
+        splineOriginalSegment = [];
+        splinePhantomBefore = null;
+        splinePhantomAfter = null;
+        controlPoints = [];
+        splineCurve = [];
+        splineWaypoints = [];
     }
 
-    selected.clear(); cpSelected.clear(); bzSelected.clear();
+    selected.clear(); cpSelected.clear();
     draw(); updateStatus();
 }
 
-// Commit current curve output to waypoints (lossless for the curve representation)
+// Commit current curve output to waypoints. Replaces only the edited
+// portion of the raceline (waypoints[start..end]) with samples from
+// the spline, preserving everything else.
 function commitCurveToWaypoints() {
-    if (mode === 'spline' && splineWaypoints.length > 0) {
-        waypoints = splineWaypoints.map(p => ({x:p.x, y:p.y, speed:p.speed, lookahead:p.lookahead}));
-        dirty = true;
-    }
-    if (mode === 'bezier' && bezierWaypoints.length > 0) {
-        waypoints = bezierWaypoints.map(p => ({x:p.x, y:p.y, speed:p.speed, lookahead:p.lookahead}));
-        dirty = true;
-    }
+    if (mode !== 'spline' || !splineRange || splineWaypoints.length === 0) return;
+    const {start, end} = splineRange;
+    const replacement = splineWaypoints.map(p =>
+        ({x:p.x, y:p.y, speed:p.speed, lookahead:p.lookahead}));
+    waypoints.splice(start, end - start + 1, ...replacement);
+    dirty = true;
 }
 
-// Get the active waypoints (what should be saved / shown in status)
+// Get the active waypoints (what should be saved / shown in status).
+// In spline mode, splice the spline output into a copy of waypoints so
+// the saved file contains the unedited portion + the new spline portion.
 function activeWaypoints() {
-    if (mode === 'spline' && splineWaypoints.length > 0) return splineWaypoints;
-    if (mode === 'bezier' && bezierWaypoints.length > 0) return bezierWaypoints;
+    if (mode === 'spline' && splineRange && splineWaypoints.length > 0) {
+        const {start, end} = splineRange;
+        const out = waypoints.slice();
+        out.splice(start, end - start + 1, ...splineWaypoints.map(p =>
+            ({x:p.x, y:p.y, speed:p.speed, lookahead:p.lookahead})));
+        return out;
+    }
     return waypoints;
 }
 
@@ -573,110 +575,102 @@ function updateSpeedRange(pts) {
 }
 
 // =====================================================================
-//  CATMULL-ROM SPLINE
+//  CATMULL-ROM SPLINE (open, with phantom endpoints)
 // =====================================================================
-function catmullRom(p0, p1, p2, p3, t, alpha) {
-    // alpha: 0 = uniform, 0.5 = centripetal, 1 = chordal
-    // Using matrix form with tension parameter
+// Standard centripetal-form Catmull-Rom: tau = 0.5
+function evalCatmullRomSegment(p0, p1, p2, p3, t) {
     const t2 = t * t, t3 = t2 * t;
-    const a = alpha; // tension factor (0.5 = standard Catmull-Rom)
+    const tau = 0.5;
     return {
-        x: a * ((-t3 + 2*t2 - t) * p0.x + (3*t3 - 5*t2 + 2) * p1.x + (-3*t3 + 4*t2 + t) * p2.x + (t3 - t2) * p3.x),
-        y: a * ((-t3 + 2*t2 - t) * p0.y + (3*t3 - 5*t2 + 2) * p1.y + (-3*t3 + 4*t2 + t) * p2.y + (t3 - t2) * p3.y),
+        x: tau * ((-t3 + 2*t2 - t) * p0.x + (3*t3 - 5*t2 + 2) * p1.x + (-3*t3 + 4*t2 + t) * p2.x + (t3 - t2) * p3.x),
+        y: tau * ((-t3 + 2*t2 - t) * p0.y + (3*t3 - 5*t2 + 2) * p1.y + (-3*t3 + 4*t2 + t) * p2.y + (t3 - t2) * p3.y),
     };
 }
 
-function evalCatmullRomClosed(pts, t, tension) {
-    // t in [0, pts.length), wraps around
+// Generate `numSamples` points along an open Catmull-Rom curve through `pts`.
+// `phantomBefore` is used as the "p0" before pts[0]; `phantomAfter` is "p3" after pts[n-1].
+// First and last samples coincide with pts[0] and pts[n-1] (curve passes through every CP).
+function buildSplineCurveOpen(pts, numSamples, phantomBefore, phantomAfter) {
+    if (pts.length < 2 || numSamples < 2) return [];
     const n = pts.length;
-    const i = Math.floor(t) % n;
-    const frac = t - Math.floor(t);
-    const p0 = pts[(i - 1 + n) % n];
-    const p1 = pts[i % n];
-    const p2 = pts[(i + 1) % n];
-    const p3 = pts[(i + 2) % n];
-
-    const s = 1 - tension; // s=1 → loose (alpha=0.5), s=0 → tight (alpha=1)
-    const alpha = 0.5 + s * 0.5; // range [0.5, 1.0]
-
-    // Standard Catmull-Rom with adjustable tension via scaling
-    const tt = frac, tt2 = tt * tt, tt3 = tt2 * tt;
-    // Tension-adjusted matrix (tau = 0.5 * (1 - tension_user) ... but let's use simple approach)
-    const tau = 0.5 * (1 + (1 - tension) * 0.5); // range roughly [0.5, 0.75]
-    return {
-        x: tau * ((-tt3 + 2*tt2 - tt) * p0.x + (3*tt3 - 5*tt2 + 2) * p1.x + (-3*tt3 + 4*tt2 + tt) * p2.x + (tt3 - tt2) * p3.x),
-        y: tau * ((-tt3 + 2*tt2 - tt) * p0.y + (3*tt3 - 5*tt2 + 2) * p1.y + (-3*tt3 + 4*tt2 + tt) * p2.y + (tt3 - tt2) * p3.y),
-    };
-}
-
-function buildSplineCurve(pts, numSamples, tension) {
-    // Generate dense samples along the closed Catmull-Rom spline
-    if (pts.length < 3) return [];
-    const n = pts.length;
+    const numSegments = n - 1;
     const curve = [];
     for (let i = 0; i < numSamples; i++) {
-        const t = (i / numSamples) * n;
-        const pt = evalCatmullRomClosed(pts, t, tension);
-        // Interpolate speed/lookahead
-        const idx = Math.floor(t) % n;
-        const frac = t - Math.floor(t);
-        const sp1 = pts[idx % n].speed, sp2 = pts[(idx + 1) % n].speed;
-        const la1 = pts[idx % n].lookahead, la2 = pts[(idx + 1) % n].lookahead;
+        const t = (i / (numSamples - 1)) * numSegments;
+        let segIdx = Math.floor(t);
+        let frac = t - segIdx;
+        if (segIdx >= numSegments) { segIdx = numSegments - 1; frac = 1; }
+
+        const p1 = pts[segIdx];
+        const p2 = pts[segIdx + 1];
+        const p0 = segIdx > 0 ? pts[segIdx - 1] : (phantomBefore || p1);
+        const p3 = segIdx < numSegments - 1 ? pts[segIdx + 2] : (phantomAfter || p2);
+
+        const pt = evalCatmullRomSegment(p0, p1, p2, p3, frac);
         curve.push({
             x: pt.x, y: pt.y,
-            speed: sp1 + (sp2 - sp1) * frac,
-            lookahead: la1 + (la2 - la1) * frac,
+            speed: p1.speed + (p2.speed - p1.speed) * frac,
+            lookahead: p1.lookahead + (p2.lookahead - p1.lookahead) * frac,
         });
     }
     return curve;
 }
 
 function regenerateSpline() {
-    const tension = splineTension;
-    const numPreview = Math.max(500, wpDensity * 2);
-    splineCurve = buildSplineCurve(controlPoints, numPreview, tension);
-    splineWaypoints = buildSplineCurve(controlPoints, wpDensity, tension);
+    if (!splineRange || controlPoints.length < 2) {
+        splineCurve = []; splineWaypoints = []; return;
+    }
+    const origN = splineOriginalSegment.length;
+    // Preview: dense sampling for smooth on-screen rendering
+    const numPreview = Math.max(200, origN * 4);
+    splineCurve = buildSplineCurveOpen(controlPoints, numPreview, splinePhantomBefore, splinePhantomAfter);
+    // Committed output: same count as original segment so the segment-replace
+    // round-trip preserves waypoint indexing and minimizes information loss.
+    splineWaypoints = buildSplineCurveOpen(controlPoints, origN, splinePhantomBefore, splinePhantomAfter);
 }
 
 // =====================================================================
-//  GENERATE CONTROL POINTS FROM WAYPOINTS
+//  GENERATE CONTROL POINTS FROM ORIGINAL SEGMENT
 // =====================================================================
 function generateControlPoints(count) {
-    if (waypoints.length === 0) return;
-    count = Math.min(count, waypoints.length);
-    controlPoints = [];
+    // Sample CPs from the *original segment snapshot* (not the live waypoints),
+    // so toggling the slider doesn't compound any earlier resampling.
+    // Endpoints are always preserved so the spline meets the unedited raceline.
+    if (splineOriginalSegment.length === 0) return;
+    const seg = splineOriginalSegment;
+    const n = seg.length;
+    count = Math.max(2, Math.min(count, n));
 
-    // Compute cumulative arc length
-    const n = waypoints.length;
-    const cumLen = [0];
-    for (let i = 1; i <= n; i++) {
-        const a = waypoints[(i - 1) % n], b = waypoints[i % n];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        cumLen.push(cumLen[i - 1] + Math.sqrt(dx * dx + dy * dy));
-    }
-    const totalLen = cumLen[n];
-
-    // Sample control points at equal arc-length intervals
-    for (let c = 0; c < count; c++) {
-        const targetLen = (c / count) * totalLen;
-        // Binary search for segment
-        let lo = 0, hi = n;
-        while (lo < hi) {
-            const mid = (lo + hi) >> 1;
-            if (cumLen[mid] < targetLen) lo = mid + 1;
-            else hi = mid;
+    if (count >= n) {
+        controlPoints = seg.map(p => ({...p}));
+    } else {
+        const cumLen = [0];
+        for (let i = 1; i < n; i++) {
+            const dx = seg[i].x - seg[i-1].x;
+            const dy = seg[i].y - seg[i-1].y;
+            cumLen.push(cumLen[i-1] + Math.sqrt(dx*dx + dy*dy));
         }
-        const segIdx = Math.max(0, lo - 1);
-        const segLen = cumLen[segIdx + 1] - cumLen[segIdx];
-        const frac = segLen > 0 ? (targetLen - cumLen[segIdx]) / segLen : 0;
-
-        const a = waypoints[segIdx % n], b = waypoints[(segIdx + 1) % n];
-        controlPoints.push({
-            x: a.x + (b.x - a.x) * frac,
-            y: a.y + (b.y - a.y) * frac,
-            speed: a.speed + (b.speed - a.speed) * frac,
-            lookahead: a.lookahead + (b.lookahead - a.lookahead) * frac,
-        });
+        const totalLen = cumLen[n-1];
+        controlPoints = [];
+        for (let c = 0; c < count; c++) {
+            const targetLen = (c / (count - 1)) * totalLen;
+            let lo = 0, hi = n - 1;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (cumLen[mid] < targetLen) lo = mid + 1;
+                else hi = mid;
+            }
+            const segIdx = Math.max(0, Math.min(n - 2, lo - 1));
+            const segLen = cumLen[segIdx + 1] - cumLen[segIdx];
+            const frac = segLen > 0 ? (targetLen - cumLen[segIdx]) / segLen : 0;
+            const a = seg[segIdx], b = seg[segIdx + 1];
+            controlPoints.push({
+                x: a.x + (b.x - a.x) * frac,
+                y: a.y + (b.y - a.y) * frac,
+                speed: a.speed + (b.speed - a.speed) * frac,
+                lookahead: a.lookahead + (b.lookahead - a.lookahead) * frac,
+            });
+        }
     }
 
     cpSelected.clear();
@@ -690,168 +684,12 @@ function onCpCountChange() {
     draw();
 }
 
-function onWpDensityChange() {
-    wpDensity = parseInt(document.getElementById('wp-density').value);
-    document.getElementById('wp-density-val').textContent = wpDensity;
-    regenerateSpline();
-    draw();
-}
-
-function onTensionChange() {
-    splineTension = parseInt(document.getElementById('spline-tension').value) / 100;
-    document.getElementById('tension-val').textContent = splineTension.toFixed(2);
-    regenerateSpline();
-    draw();
-}
-
 // Commit current curve to waypoints and switch to points mode for fine-tuning
 function commitAndGoPoints() {
-    pushUndo();
-    commitCurveToWaypoints();
-    showToast(`Committed ${waypoints.length} waypoints from ${mode} mode`);
-    setMode('points');
+    const replacedCount = splineOriginalSegment.length;
+    setMode('points');  // setMode already pushes undo + commits before leaving spline
+    showToast(`Replaced ${replacedCount} waypoints with spline output.`);
 }
-
-// =====================================================================
-//  CUBIC BEZIER
-// =====================================================================
-function cubicBezier(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, t) {
-    const u = 1 - t, u2 = u * u, u3 = u2 * u;
-    const t2 = t * t, t3 = t2 * t;
-    return {
-        x: u3*p0x + 3*u2*t*p1x + 3*u*t2*p2x + t3*p3x,
-        y: u3*p0y + 3*u2*t*p1y + 3*u*t2*p2y + t3*p3y,
-    };
-}
-
-function generateBezierAnchors(count) {
-    if (waypoints.length === 0) return;
-    count = Math.min(count, waypoints.length);
-    bezierAnchors = [];
-
-    // Sample anchor positions at equal arc-length (same as spline)
-    const n = waypoints.length;
-    const cumLen = [0];
-    for (let i = 1; i <= n; i++) {
-        const a = waypoints[(i-1)%n], b = waypoints[i%n];
-        cumLen.push(cumLen[i-1] + Math.hypot(b.x-a.x, b.y-a.y));
-    }
-    const totalLen = cumLen[n];
-    const sampled = [];
-    for (let c = 0; c < count; c++) {
-        const target = (c / count) * totalLen;
-        let lo = 0, hi = n;
-        while (lo < hi) { const mid = (lo+hi)>>1; if (cumLen[mid]<target) lo=mid+1; else hi=mid; }
-        const si = Math.max(0, lo-1);
-        const segL = cumLen[si+1]-cumLen[si];
-        const f = segL > 0 ? (target-cumLen[si])/segL : 0;
-        const a = waypoints[si%n], b = waypoints[(si+1)%n];
-        sampled.push({
-            x: a.x+(b.x-a.x)*f, y: a.y+(b.y-a.y)*f,
-            speed: a.speed+(b.speed-a.speed)*f,
-            lookahead: a.lookahead+(b.lookahead-a.lookahead)*f,
-        });
-    }
-
-    // Convert to anchors with auto-computed handles (Catmull-Rom → Bezier)
-    for (let i = 0; i < count; i++) {
-        const prev = sampled[(i-1+count)%count];
-        const curr = sampled[i];
-        const next = sampled[(i+1)%count];
-        // Tangent = (next - prev) / 2, handle length = tangent / 3
-        const tx = (next.x - prev.x) / 6;
-        const ty = (next.y - prev.y) / 6;
-        bezierAnchors.push({
-            x: curr.x, y: curr.y,
-            hix: -tx, hiy: -ty,  // handle-in (arriving)
-            hox: tx, hoy: ty,    // handle-out (departing)
-            speed: curr.speed, lookahead: curr.lookahead,
-        });
-    }
-
-    bzSelected.clear();
-    regenerateBezier();
-}
-
-function regenerateBezier() {
-    const anchors = bezierAnchors;
-    if (anchors.length < 2) { bezierCurve = []; bezierWaypoints = []; return; }
-    const n = anchors.length;
-    const samplesPerSeg = Math.max(10, Math.ceil(bzDensity * 2 / n));
-
-    // Dense preview
-    bezierCurve = [];
-    for (let i = 0; i < n; i++) {
-        const a0 = anchors[i], a1 = anchors[(i+1)%n];
-        const p0x = a0.x, p0y = a0.y;
-        const p1x = a0.x + a0.hox, p1y = a0.y + a0.hoy;
-        const p2x = a1.x + a1.hix, p2y = a1.y + a1.hiy;
-        const p3x = a1.x, p3y = a1.y;
-        for (let j = 0; j < samplesPerSeg; j++) {
-            const t = j / samplesPerSeg;
-            const pt = cubicBezier(p0x,p0y,p1x,p1y,p2x,p2y,p3x,p3y,t);
-            pt.speed = a0.speed + (a1.speed - a0.speed) * t;
-            pt.lookahead = a0.lookahead + (a1.lookahead - a0.lookahead) * t;
-            bezierCurve.push(pt);
-        }
-    }
-
-    // Output waypoints at equal arc-length
-    if (bezierCurve.length < 2) { bezierWaypoints = []; return; }
-    const cLen = [0];
-    for (let i = 1; i < bezierCurve.length; i++) {
-        cLen.push(cLen[i-1] + Math.hypot(bezierCurve[i].x-bezierCurve[i-1].x, bezierCurve[i].y-bezierCurve[i-1].y));
-    }
-    // Add closing segment
-    const closeDist = Math.hypot(bezierCurve[0].x-bezierCurve[bezierCurve.length-1].x, bezierCurve[0].y-bezierCurve[bezierCurve.length-1].y);
-    const totalArc = cLen[cLen.length-1] + closeDist;
-
-    bezierWaypoints = [];
-    for (let w = 0; w < bzDensity; w++) {
-        const target = (w / bzDensity) * totalArc;
-        let lo = 0, hi = cLen.length - 1;
-        while (lo < hi) { const mid = (lo+hi)>>1; if (cLen[mid]<target) lo=mid+1; else hi=mid; }
-        const si = Math.max(0, lo-1);
-        if (si >= bezierCurve.length - 1) {
-            // In closing segment
-            const f = totalArc > 0 ? (target - cLen[cLen.length-1]) / closeDist : 0;
-            const a = bezierCurve[bezierCurve.length-1], b = bezierCurve[0];
-            bezierWaypoints.push({
-                x: a.x+(b.x-a.x)*f, y: a.y+(b.y-a.y)*f,
-                speed: a.speed+(b.speed-a.speed)*f,
-                lookahead: a.lookahead+(b.lookahead-a.lookahead)*f,
-            });
-        } else {
-            const segL = cLen[si+1]-cLen[si];
-            const f = segL > 0 ? (target-cLen[si])/segL : 0;
-            const a = bezierCurve[si], b = bezierCurve[si+1];
-            bezierWaypoints.push({
-                x: a.x+(b.x-a.x)*f, y: a.y+(b.y-a.y)*f,
-                speed: a.speed+(b.speed-a.speed)*f,
-                lookahead: a.lookahead+(b.lookahead-a.lookahead)*f,
-            });
-        }
-    }
-}
-
-function onBzCountChange() {
-    const v = parseInt(document.getElementById('bz-count').value);
-    document.getElementById('bz-count-val').textContent = v;
-    generateBezierAnchors(v);
-    draw();
-}
-
-function onBzDensityChange() {
-    bzDensity = parseInt(document.getElementById('bz-density').value);
-    document.getElementById('bz-density-val').textContent = bzDensity;
-    regenerateBezier();
-    draw();
-}
-
-function onBzSmoothToggle() {
-    bzSmooth = document.getElementById('bz-smooth').checked;
-}
-
 
 // =====================================================================
 //  DRAWING
@@ -869,8 +707,7 @@ function draw() {
     }
 
     if (mode === 'points') drawPointsMode();
-    else if (mode === 'spline') drawSplineMode();
-    else drawBezierMode();
+    else drawSplineMode();
 }
 
 function drawPointsMode() {
@@ -927,37 +764,42 @@ function drawPointsMode() {
 }
 
 function drawSplineMode() {
-    if (controlPoints.length < 3) return;
+    if (controlPoints.length < 2 || !splineRange) return;
+    const {start, end} = splineRange;
 
-    // Determine color range from control points
-    updateSpeedRange(controlPoints);
+    // Combine all visible points so the speed colormap spans the whole raceline
+    updateSpeedRange(waypoints);
 
-    // Draw the existing waypoints faintly in background
+    // ---- Draw the unedited portion of the raceline as a faded path ----
+    // Edit segment in waypoints[] is [start..end]; everything else is unchanged.
     if (waypoints.length > 1) {
         ctx.beginPath();
-        for (let i = 0; i < waypoints.length; i++) {
-            const [sx, sy] = worldToScreen(waypoints[i].x, waypoints[i].y);
-            i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy);
+        const [hx, hy] = worldToScreen(waypoints[(end + 1) % waypoints.length].x,
+                                       waypoints[(end + 1) % waypoints.length].y);
+        ctx.moveTo(hx, hy);
+        for (let i = 1; i <= waypoints.length - (end - start + 1); i++) {
+            const idx = (end + 1 + i) % waypoints.length;
+            const [sx, sy] = worldToScreen(waypoints[idx].x, waypoints[idx].y);
+            ctx.lineTo(sx, sy);
         }
-        const [sx0, sy0] = worldToScreen(waypoints[0].x, waypoints[0].y);
-        ctx.lineTo(sx0, sy0);
-        ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.strokeStyle = 'rgba(180,180,200,0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
 
-        // Faint dots
+        // Faint dots for the unedited waypoints
         const faintR = Math.max(1.5, 2 / Math.sqrt(zoom) * Math.min(zoom, 1.5));
         for (let i = 0; i < waypoints.length; i++) {
+            if (i >= start && i <= end) continue;
             const [sx, sy] = worldToScreen(waypoints[i].x, waypoints[i].y);
             if (sx < -10 || sy < -10 || sx > W + 10 || sy > H + 10) continue;
             ctx.beginPath(); ctx.arc(sx, sy, faintR, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fill();
+            ctx.fillStyle = 'rgba(180,180,200,0.4)'; ctx.fill();
         }
     }
 
-    // Draw spline curve (color-coded by speed)
+    // ---- Draw spline curve (color-coded by speed, OPEN — does not wrap) ----
     if (splineCurve.length > 1) {
-        for (let i = 0; i < splineCurve.length; i++) {
+        for (let i = 0; i < splineCurve.length - 1; i++) {
             const a = splineCurve[i];
-            const b = splineCurve[(i + 1) % splineCurve.length];
+            const b = splineCurve[i + 1];
             const [sx1, sy1] = worldToScreen(a.x, a.y);
             const [sx2, sy2] = worldToScreen(b.x, b.y);
             ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(sx2, sy2);
@@ -966,7 +808,7 @@ function drawSplineMode() {
         }
     }
 
-    // Draw output waypoint positions as small ticks
+    // ---- Draw output waypoint positions as small ticks ----
     if (splineWaypoints.length > 0) {
         const tickR = Math.max(2, 3 / Math.sqrt(zoom) * Math.min(zoom, 1.5));
         for (let i = 0; i < splineWaypoints.length; i++) {
@@ -979,18 +821,16 @@ function drawSplineMode() {
         }
     }
 
-    // Draw control point connections
+    // ---- Draw control point connections (open, not closed) ----
     ctx.beginPath();
     for (let i = 0; i < controlPoints.length; i++) {
         const [sx, sy] = worldToScreen(controlPoints[i].x, controlPoints[i].y);
         i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy);
     }
-    const [csx, csy] = worldToScreen(controlPoints[0].x, controlPoints[0].y);
-    ctx.lineTo(csx, csy);
     ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
 
-    // Draw control points as diamonds
+    // ---- Draw control points as diamonds ----
     const cpR = Math.max(5, 7 / Math.sqrt(zoom) * Math.min(zoom, 2));
     for (let i = 0; i < controlPoints.length; i++) {
         const cp = controlPoints[i];
@@ -1000,7 +840,6 @@ function drawSplineMode() {
         const isSel = cpSelected.has(i), isHov = i === cpHoveredIdx;
         const r = isSel ? cpR * 1.3 : cpR;
 
-        // Diamond shape
         ctx.beginPath();
         ctx.moveTo(sx, sy - r); ctx.lineTo(sx + r, sy);
         ctx.lineTo(sx, sy + r); ctx.lineTo(sx - r, sy); ctx.closePath();
@@ -1008,7 +847,6 @@ function drawSplineMode() {
         ctx.strokeStyle = isSel ? '#fff' : (isHov ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.5)');
         ctx.lineWidth = isSel ? 2.5 : 1.5; ctx.stroke();
 
-        // Label
         ctx.fillStyle = isSel ? '#fff' : 'rgba(255,255,255,0.6)';
         ctx.font = '11px monospace';
         ctx.fillText(`C${i}`, sx + r + 4, sy - r + 2);
@@ -1036,121 +874,13 @@ function drawSplineMode() {
     }
 }
 
-function drawBezierMode() {
-    if (bezierAnchors.length < 2) return;
-    updateSpeedRange(bezierAnchors);
-
-    // Faint original waypoints
-    if (waypoints.length > 1) {
-        ctx.beginPath();
-        for (let i = 0; i < waypoints.length; i++) {
-            const [sx,sy] = worldToScreen(waypoints[i].x, waypoints[i].y);
-            i===0 ? ctx.moveTo(sx,sy) : ctx.lineTo(sx,sy);
-        }
-        ctx.lineTo(...worldToScreen(waypoints[0].x, waypoints[0].y));
-        ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1; ctx.stroke();
-    }
-
-    // Draw bezier curve (color-coded)
-    if (bezierCurve.length > 1) {
-        for (let i = 0; i < bezierCurve.length; i++) {
-            const a = bezierCurve[i], b = bezierCurve[(i+1)%bezierCurve.length];
-            const [sx1,sy1] = worldToScreen(a.x,a.y);
-            const [sx2,sy2] = worldToScreen(b.x,b.y);
-            ctx.beginPath(); ctx.moveTo(sx1,sy1); ctx.lineTo(sx2,sy2);
-            ctx.strokeStyle = speedColor(a.speed); ctx.lineWidth = 3; ctx.stroke();
-        }
-    }
-
-    // Output waypoint ticks
-    if (bezierWaypoints.length > 0) {
-        const tr = Math.max(2, 3/Math.sqrt(zoom)*Math.min(zoom,1.5));
-        for (const wp of bezierWaypoints) {
-            const [sx,sy] = worldToScreen(wp.x,wp.y);
-            if (sx<-10||sy<-10||sx>W+10||sy>H+10) continue;
-            ctx.beginPath(); ctx.arc(sx,sy,tr,0,Math.PI*2);
-            ctx.fillStyle = speedColor(wp.speed); ctx.globalAlpha=0.4; ctx.fill(); ctx.globalAlpha=1;
-        }
-    }
-
-    const aR = Math.max(5, 7/Math.sqrt(zoom)*Math.min(zoom,2));
-    const hR = Math.max(3, 5/Math.sqrt(zoom)*Math.min(zoom,2));
-
-    // Draw handles and tangent lines for selected/hovered anchors
-    for (let i = 0; i < bezierAnchors.length; i++) {
-        const a = bezierAnchors[i];
-        const isSel = bzSelected.has(i);
-        const isHov = i === bzHoveredIdx;
-        if (!isSel && !isHov) continue;
-
-        const [ax,ay] = worldToScreen(a.x, a.y);
-        const [hix,hiy] = worldToScreen(a.x+a.hix, a.y+a.hiy);
-        const [hox,hoy] = worldToScreen(a.x+a.hox, a.y+a.hoy);
-
-        // Tangent lines
-        ctx.beginPath(); ctx.moveTo(hix,hiy); ctx.lineTo(ax,ay); ctx.lineTo(hox,hoy);
-        ctx.strokeStyle = 'rgba(100,200,255,0.6)'; ctx.lineWidth = 1.5; ctx.stroke();
-
-        // Handle-in circle
-        ctx.beginPath(); ctx.arc(hix,hiy,hR,0,Math.PI*2);
-        ctx.fillStyle = '#4488ff'; ctx.fill();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-
-        // Handle-out circle
-        ctx.beginPath(); ctx.arc(hox,hoy,hR,0,Math.PI*2);
-        ctx.fillStyle = '#ff8844'; ctx.fill();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-    }
-
-    // Draw anchor points as squares
-    for (let i = 0; i < bezierAnchors.length; i++) {
-        const a = bezierAnchors[i];
-        const [sx,sy] = worldToScreen(a.x, a.y);
-        if (sx<-20||sy<-20||sx>W+20||sy>H+20) continue;
-        const isSel = bzSelected.has(i), isHov = i === bzHoveredIdx;
-        const r = isSel ? aR*1.3 : aR;
-
-        ctx.fillStyle = speedColor(a.speed);
-        ctx.fillRect(sx-r, sy-r, r*2, r*2);
-        ctx.strokeStyle = isSel ? '#fff' : (isHov ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.5)');
-        ctx.lineWidth = isSel ? 2.5 : 1.5;
-        ctx.strokeRect(sx-r, sy-r, r*2, r*2);
-
-        // Label
-        ctx.fillStyle = isSel ? '#fff' : 'rgba(255,255,255,0.6)';
-        ctx.font = '11px monospace';
-        ctx.fillText(`B${i}`, sx+r+4, sy-r+2);
-    }
-
-    // Lookahead for selected
-    const showBz = bzHoveredIdx >= 0 ? bzHoveredIdx : (bzSelected.size===1 ? [...bzSelected][0] : -1);
-    if (showBz >= 0) {
-        const a = bezierAnchors[showBz];
-        const [sx,sy] = worldToScreen(a.x,a.y);
-        const laR = a.lookahead / mapMeta.resolution * zoom;
-        ctx.beginPath(); ctx.arc(sx,sy,laR,0,Math.PI*2);
-        ctx.strokeStyle='rgba(255,255,100,0.4)'; ctx.lineWidth=1;
-        ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]);
-    }
-
-    // Selection rect
-    if (dragType === 'select-rect' && rectStart) {
-        const [sx,sy] = rectStart;
-        const [ex,ey] = [lastMouseScreen.x, lastMouseScreen.y];
-        ctx.strokeStyle='#e94560'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
-        ctx.strokeRect(sx,sy,ex-sx,ey-sy);
-        ctx.fillStyle='rgba(233,69,96,0.1)'; ctx.fillRect(sx,sy,ex-sx,ey-sy);
-        ctx.setLineDash([]);
-    }
-}
-
 // =====================================================================
 //  HIT TESTING
 // =====================================================================
 function hitTest(sx, sy, radius) {
     radius = radius || 10;
     let best = -1, bestDist = radius * radius;
-    const arr = mode === 'points' ? waypoints : (mode === 'spline' ? controlPoints : bezierAnchors);
+    const arr = mode === 'points' ? waypoints : controlPoints;
     for (let i = 0; i < arr.length; i++) {
         const [wx, wy] = worldToScreen(arr[i].x, arr[i].y);
         const dx = sx - wx, dy = sy - wy;
@@ -1160,24 +890,6 @@ function hitTest(sx, sy, radius) {
     return best;
 }
 
-// Hit test bezier handles (returns {idx, type} or null)
-function hitTestBzHandle(sx, sy, radius) {
-    radius = radius || 14;
-    const r2 = radius * radius;
-    // Only check handles of selected/hovered anchors
-    for (let i = 0; i < bezierAnchors.length; i++) {
-        if (!bzSelected.has(i) && i !== bzHoveredIdx) continue;
-        const a = bezierAnchors[i];
-        // Handle-in
-        const [hix,hiy] = worldToScreen(a.x+a.hix, a.y+a.hiy);
-        if ((sx-hix)**2+(sy-hiy)**2 < r2) return {idx:i, type:'handle-in'};
-        // Handle-out
-        const [hox,hoy] = worldToScreen(a.x+a.hox, a.y+a.hoy);
-        if ((sx-hox)**2+(sy-hoy)**2 < r2) return {idx:i, type:'handle-out'};
-    }
-    return null;
-}
-
 // =====================================================================
 //  UNDO
 // =====================================================================
@@ -1185,19 +897,24 @@ function currentState() {
     return {
         waypoints: JSON.parse(JSON.stringify(waypoints)),
         controlPoints: JSON.parse(JSON.stringify(controlPoints)),
-        bezierAnchors: JSON.parse(JSON.stringify(bezierAnchors)),
+        splineRange: splineRange ? {...splineRange} : null,
+        splineOriginalSegment: JSON.parse(JSON.stringify(splineOriginalSegment)),
+        splinePhantomBefore: splinePhantomBefore ? {...splinePhantomBefore} : null,
+        splinePhantomAfter: splinePhantomAfter ? {...splinePhantomAfter} : null,
     };
 }
 
 function restoreState(state) {
     waypoints = state.waypoints;
     controlPoints = state.controlPoints;
-    bezierAnchors = state.bezierAnchors;
+    splineRange = state.splineRange;
+    splineOriginalSegment = state.splineOriginalSegment || [];
+    splinePhantomBefore = state.splinePhantomBefore;
+    splinePhantomAfter = state.splinePhantomAfter;
     dirty = true;
-    selected.clear(); cpSelected.clear(); bzSelected.clear();
-    if (mode === 'spline' && controlPoints.length >= 3) regenerateSpline();
-    if (mode === 'bezier' && bezierAnchors.length >= 2) regenerateBezier();
-    updatePanel(); updateCpPanel(); updateBzPanel();
+    selected.clear(); cpSelected.clear();
+    if (mode === 'spline' && controlPoints.length >= 2) regenerateSpline();
+    updatePanel(); updateCpPanel();
     draw(); updateStatus();
 }
 
@@ -1338,98 +1055,41 @@ function applyCpBulk() {
     dirty = true; regenerateSpline(); updateCpPanel(); draw(); updateStatus();
 }
 
-// =====================================================================
-//  BEZIER MODE PANEL
-// =====================================================================
-function updateBzPanel() {
-    if (mode !== 'bezier') return;
-    const n = bzSelected.size;
-    document.getElementById('bz-no-sel').style.display = n===0 ? '' : 'none';
-    document.getElementById('bz-single-sel').style.display = n===1 ? '' : 'none';
-    document.getElementById('bz-multi-sel').style.display = n>1 ? '' : 'none';
-
-    if (n === 1) {
-        const idx = [...bzSelected][0]; const a = bezierAnchors[idx];
-        document.getElementById('bz-idx').value = `B${idx}`;
-        document.getElementById('bz-x').value = a.x.toFixed(6);
-        document.getElementById('bz-y').value = a.y.toFixed(6);
-        document.getElementById('bz-speed').value = a.speed;
-        document.getElementById('bz-la').value = a.lookahead;
-    } else if (n > 1) {
-        const list = document.getElementById('bz-list');
-        list.innerHTML = '';
-        for (const idx of [...bzSelected].sort((a,b)=>a-b)) {
-            const a = bezierAnchors[idx];
-            const div = document.createElement('div');
-            div.className = 'wp-item selected';
-            div.innerHTML = `<span>B${idx}</span><span>v=${a.speed.toFixed(2)} la=${a.lookahead.toFixed(2)}</span>`;
-            div.onclick = () => { bzSelected.clear(); bzSelected.add(idx); updateBzPanel(); draw(); };
-            list.appendChild(div);
-        }
-    }
-}
-
-function updateBzField(field) {
-    if (bzSelected.size !== 1) return;
-    const idx = [...bzSelected][0]; pushUndo();
-    if (field==='x') bezierAnchors[idx].x = parseFloat(document.getElementById('bz-x').value);
-    if (field==='y') bezierAnchors[idx].y = parseFloat(document.getElementById('bz-y').value);
-    if (field==='speed') bezierAnchors[idx].speed = parseFloat(document.getElementById('bz-speed').value);
-    if (field==='lookahead') bezierAnchors[idx].lookahead = parseFloat(document.getElementById('bz-la').value);
-    dirty = true; regenerateBezier(); draw(); updateStatus();
-}
-
-function applyBzBulk() {
-    if (bzSelected.size === 0) return;
-    const sv = document.getElementById('bz-bulk-speed').value;
-    const lv = document.getElementById('bz-bulk-la').value;
-    if (!sv && !lv) return; pushUndo();
-    for (const idx of bzSelected) {
-        if (sv) bezierAnchors[idx].speed = parseFloat(sv);
-        if (lv) bezierAnchors[idx].lookahead = parseFloat(lv);
-    }
-    dirty = true; regenerateBezier(); updateBzPanel(); draw(); updateStatus();
-}
-
-function deleteBzSelected() {
-    if (bzSelected.size === 0) return;
-    if (bezierAnchors.length - bzSelected.size < 2) { alert('Need at least 2 anchors.'); return; }
-    if (!confirm(`Delete ${bzSelected.size} anchor(s)?`)) return;
+function applyBulkMultiplier() {
+    if (selected.size === 0) return;
+    const sm = parseFloat(document.getElementById('bulk-speed-mul').value);
+    const lm = parseFloat(document.getElementById('bulk-la-mul').value);
+    if (!sm && !lm) return;
     pushUndo();
-    for (const idx of [...bzSelected].sort((a,b)=>b-a)) bezierAnchors.splice(idx,1);
-    bzSelected.clear(); dirty = true;
-    regenerateBezier(); updateBzPanel(); draw(); updateStatus();
+    for (const idx of selected) {
+        if (sm) waypoints[idx].speed *= sm;
+        if (lm) waypoints[idx].lookahead *= lm;
+    }
+    dirty = true; updatePanel(); draw(); updateStatus();
 }
 
-function addBezierAnchorNear(wx, wy) {
-    if (bezierAnchors.length < 2) return;
-    let bestIdx = 0, bestDist = Infinity;
-    for (let i = 0; i < bezierAnchors.length; i++) {
-        const a = bezierAnchors[i], b = bezierAnchors[(i+1)%bezierAnchors.length];
-        const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
-        const d = (wx-mx)**2+(wy-my)**2;
-        if (d < bestDist) { bestDist = d; bestIdx = i; }
-    }
-    const a = bezierAnchors[bestIdx], b = bezierAnchors[(bestIdx+1)%bezierAnchors.length];
-    const newA = {
-        x: wx, y: wy,
-        hix: (a.x-wx)*0.3, hiy: (a.y-wy)*0.3,
-        hox: (b.x-wx)*0.3, hoy: (b.y-wy)*0.3,
-        speed: (a.speed+b.speed)/2,
-        lookahead: (a.lookahead+b.lookahead)/2,
-    };
+function applyCpMultiplier() {
+    if (cpSelected.size === 0) return;
+    const sm = parseFloat(document.getElementById('cp-bulk-speed-mul').value);
+    const lm = parseFloat(document.getElementById('cp-bulk-la-mul').value);
+    if (!sm && !lm) return;
     pushUndo();
-    bezierAnchors.splice(bestIdx+1, 0, newA);
-    document.getElementById('bz-count').value = bezierAnchors.length;
-    document.getElementById('bz-count-val').textContent = bezierAnchors.length;
-    bzSelected.clear(); bzSelected.add(bestIdx+1);
-    dirty = true; regenerateBezier(); updateBzPanel(); draw(); updateStatus();
+    for (const idx of cpSelected) {
+        if (sm) controlPoints[idx].speed *= sm;
+        if (lm) controlPoints[idx].lookahead *= lm;
+    }
+    dirty = true; regenerateSpline(); updateCpPanel(); draw(); updateStatus();
 }
 
 function deleteCpSelected() {
     if (cpSelected.size === 0) return;
-    if (controlPoints.length - cpSelected.size < 3) {
-        alert('Need at least 3 control points for a spline.');
+    // Don't let user delete the first or last CP (they anchor the spline to the unedited raceline).
+    if (cpSelected.has(0) || cpSelected.has(controlPoints.length - 1)) {
+        alert('Cannot delete the first or last control point — they anchor the spline to the rest of the raceline.');
+        return;
+    }
+    if (controlPoints.length - cpSelected.size < 2) {
+        alert('Need at least 2 control points for a spline.');
         return;
     }
     if (!confirm(`Delete ${cpSelected.size} control point(s)?`)) return;
@@ -1440,17 +1100,16 @@ function deleteCpSelected() {
 }
 
 function addControlPointNear(wx, wy) {
-    // Find the spline segment closest to the click and insert a new CP there
-    if (controlPoints.length < 3) return;
+    // Insert a new CP into the closest open segment between two existing CPs.
+    if (controlPoints.length < 2) return;
     let bestIdx = 0, bestDist = Infinity;
-    for (let i = 0; i < controlPoints.length; i++) {
-        const a = controlPoints[i], b = controlPoints[(i + 1) % controlPoints.length];
-        // Project click onto segment a→b
+    for (let i = 0; i < controlPoints.length - 1; i++) {
+        const a = controlPoints[i], b = controlPoints[i + 1];
         const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
         const d = (wx - mx) * (wx - mx) + (wy - my) * (wy - my);
         if (d < bestDist) { bestDist = d; bestIdx = i; }
     }
-    const a = controlPoints[bestIdx], b = controlPoints[(bestIdx + 1) % controlPoints.length];
+    const a = controlPoints[bestIdx], b = controlPoints[bestIdx + 1];
     const newCp = {
         x: wx, y: wy,
         speed: (a.speed + b.speed) / 2,
@@ -1470,8 +1129,7 @@ function addControlPointNear(wx, wy) {
 function updateStatus() {
     const awp = activeWaypoints();
     document.getElementById('status-wp').textContent =
-        mode === 'spline' ? `CPs: ${controlPoints.length} | WPs: ${awp.length}` :
-        mode === 'bezier' ? `Anchors: ${bezierAnchors.length} | WPs: ${awp.length}` :
+        mode === 'spline' ? `CPs: ${controlPoints.length} | Editing ${splineOriginalSegment.length} of ${awp.length} WPs` :
         `Waypoints: ${awp.length}`;
     document.getElementById('status-zoom').textContent = `Zoom: ${(zoom * 100).toFixed(0)}%`;
     document.getElementById('status-dirty').textContent = dirty ? '● Unsaved changes' : '';
@@ -1486,7 +1144,7 @@ function onMouseDown(e) {
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
     // Pan
-    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+    if (e.button === 1 || e.button === 2 || (e.button === 0 && e.altKey)) {
         dragType = 'pan';
         dragStart = {x: sx, y: sy, panX, panY};
         canvas.style.cursor = 'grabbing';
@@ -1494,21 +1152,10 @@ function onMouseDown(e) {
     }
     if (e.button !== 0) return;
 
-    // Bezier handle hit test (check before anchor hit test)
-    if (mode === 'bezier') {
-        const hh = hitTestBzHandle(sx, sy, 14);
-        if (hh) {
-            bzDragType = hh.type; bzDragIdx = hh.idx;
-            dragType = 'bz-handle';
-            pushUndo();
-            draw(); return;
-        }
-    }
-
-    const hitRadius = mode === 'bezier' ? 16 : (mode === 'spline' ? 16 : 12);
+    const hitRadius = mode === 'spline' ? 16 : 12;
     const hit = hitTest(sx, sy, hitRadius);
-    const sel = mode === 'points' ? selected : (mode === 'spline' ? cpSelected : bzSelected);
-    const panelFn = mode === 'points' ? updatePanel : (mode === 'spline' ? updateCpPanel : updateBzPanel);
+    const sel = mode === 'points' ? selected : cpSelected;
+    const panelFn = mode === 'points' ? updatePanel : updateCpPanel;
 
     if (hit >= 0 && (e.ctrlKey || e.metaKey)) {
         if (sel.has(hit)) sel.delete(hit); else sel.add(hit);
@@ -1522,7 +1169,7 @@ function onMouseDown(e) {
 
         dragType = 'point';
         const [wx, wy] = screenToWorld(sx, sy);
-        const arr = mode === 'points' ? waypoints : (mode === 'spline' ? controlPoints : bezierAnchors);
+        const arr = mode === 'points' ? waypoints : controlPoints;
         dragPointOffsets = [];
         for (const idx of sel) {
             dragPointOffsets.push({ idx, dx: arr[idx].x - wx, dy: arr[idx].y - wy });
@@ -1548,16 +1195,15 @@ function onMouseMove(e) {
 
     // Tooltip
     const tip = document.getElementById('tooltip');
-    const hitRadius = mode === 'bezier' ? 16 : (mode === 'spline' ? 16 : 12);
+    const hitRadius = mode === 'spline' ? 16 : 12;
     const hov = hitTest(sx, sy, hitRadius);
 
     if (mode === 'points') hoveredIdx = hov;
-    else if (mode === 'spline') cpHoveredIdx = hov;
-    else { bzHoveredIdx = hov; bzHoveredType = hov >= 0 ? 'anchor' : null; }
+    else cpHoveredIdx = hov;
 
-    if (hov >= 0 && dragType !== 'point' && dragType !== 'bz-handle') {
-        const arr = mode === 'points' ? waypoints : (mode === 'spline' ? controlPoints : bezierAnchors);
-        const prefix = mode === 'points' ? `#${hov}` : (mode === 'spline' ? `C${hov}` : `B${hov}`);
+    if (hov >= 0 && dragType !== 'point') {
+        const arr = mode === 'points' ? waypoints : controlPoints;
+        const prefix = mode === 'points' ? `#${hov}` : `C${hov}`;
         const p = arr[hov];
         tip.style.display = 'block';
         tip.style.left = (e.clientX + 14) + 'px';
@@ -1573,29 +1219,15 @@ function onMouseMove(e) {
         draw(); updateStatus(); return;
     }
 
-    if (dragType === 'bz-handle') {
-        const a = bezierAnchors[bzDragIdx];
-        const hdx = wx - a.x, hdy = wy - a.y;
-        if (bzDragType === 'handle-out') {
-            a.hox = hdx; a.hoy = hdy;
-            if (bzSmooth) { const len = Math.hypot(a.hix,a.hiy); const nlen = Math.hypot(hdx,hdy)||1; a.hix = -hdx*len/nlen; a.hiy = -hdy*len/nlen; }
-        } else {
-            a.hix = hdx; a.hiy = hdy;
-            if (bzSmooth) { const len = Math.hypot(a.hox,a.hoy); const nlen = Math.hypot(hdx,hdy)||1; a.hox = -hdx*len/nlen; a.hoy = -hdy*len/nlen; }
-        }
-        dirty = true; regenerateBezier(); draw(); updateStatus(); return;
-    }
-
     if (dragType === 'point') {
-        const arr = mode === 'points' ? waypoints : (mode === 'spline' ? controlPoints : bezierAnchors);
+        const arr = mode === 'points' ? waypoints : controlPoints;
         for (const off of dragPointOffsets) {
             arr[off.idx].x = wx + off.dx;
             arr[off.idx].y = wy + off.dy;
         }
         dirty = true;
         if (mode === 'spline') regenerateSpline();
-        if (mode === 'bezier') regenerateBezier();
-        const panelFn = mode === 'points' ? updatePanel : (mode === 'spline' ? updateCpPanel : updateBzPanel);
+        const panelFn = mode === 'points' ? updatePanel : updateCpPanel;
         panelFn();
         draw(); updateStatus(); return;
     }
@@ -1612,19 +1244,19 @@ function onMouseUp(e) {
         const x1 = Math.min(rectStart[0], sx), y1 = Math.min(rectStart[1], sy);
         const x2 = Math.max(rectStart[0], sx), y2 = Math.max(rectStart[1], sy);
         if (Math.abs(x2 - x1) > 3 || Math.abs(y2 - y1) > 3) {
-            const arr = mode === 'points' ? waypoints : (mode === 'spline' ? controlPoints : bezierAnchors);
-            const sel = mode === 'points' ? selected : (mode === 'spline' ? cpSelected : bzSelected);
+            const arr = mode === 'points' ? waypoints : controlPoints;
+            const sel = mode === 'points' ? selected : cpSelected;
             for (let i = 0; i < arr.length; i++) {
                 const [wx, wy] = worldToScreen(arr[i].x, arr[i].y);
                 if (wx >= x1 && wx <= x2 && wy >= y1 && wy <= y2) sel.add(i);
             }
         }
-        const panelFn = mode === 'points' ? updatePanel : (mode === 'spline' ? updateCpPanel : updateBzPanel);
+        const panelFn = mode === 'points' ? updatePanel : updateCpPanel;
         panelFn();
     }
 
     if (dragType === 'point') {
-        const panelFn = mode === 'points' ? updatePanel : (mode === 'spline' ? updateCpPanel : updateBzPanel);
+        const panelFn = mode === 'points' ? updatePanel : updateCpPanel;
         panelFn();
     }
 
@@ -1654,25 +1286,19 @@ document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key === 's') { e.preventDefault(); save(); }
     if (e.ctrlKey && e.key === 'a') {
         e.preventDefault();
-        const arr = mode === 'points' ? waypoints : (mode === 'spline' ? controlPoints : bezierAnchors);
-        const sel = mode === 'points' ? selected : (mode === 'spline' ? cpSelected : bzSelected);
+        const arr = mode === 'points' ? waypoints : controlPoints;
+        const sel = mode === 'points' ? selected : cpSelected;
         for (let i = 0; i < arr.length; i++) sel.add(i);
-        const panelFn = mode === 'points' ? updatePanel : (mode === 'spline' ? updateCpPanel : updateBzPanel);
+        const panelFn = mode === 'points' ? updatePanel : updateCpPanel;
         panelFn(); draw();
     }
     if (e.key === 'Escape') {
-        selected.clear(); cpSelected.clear(); bzSelected.clear();
-        updatePanel(); updateCpPanel(); updateBzPanel(); draw();
+        selected.clear(); cpSelected.clear();
+        updatePanel(); updateCpPanel(); draw();
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && document.activeElement.tagName !== 'INPUT') {
         if (mode === 'points' && selected.size > 0) deleteSelected();
         if (mode === 'spline' && cpSelected.size > 0) deleteCpSelected();
-        if (mode === 'bezier' && bzSelected.size > 0) deleteBzSelected();
-    }
-    if (e.key === 'Tab') {
-        e.preventDefault();
-        const modes = ['points', 'spline', 'bezier'];
-        setMode(modes[(modes.indexOf(mode) + 1) % 3]);
     }
 });
 
@@ -1753,14 +1379,6 @@ async function init() {
     mapImg.onload = () => { resize(); resetView(); };
     mapImg.src = 'data:image/png;base64,' + data.mapPng;
 
-    // Set initial wp density to match loaded waypoint count
-    wpDensity = waypoints.length;
-    bzDensity = waypoints.length;
-    document.getElementById('wp-density').value = wpDensity;
-    document.getElementById('wp-density-val').textContent = wpDensity;
-    document.getElementById('bz-density').value = bzDensity;
-    document.getElementById('bz-density-val').textContent = bzDensity;
-
     window.addEventListener('resize', resize);
     canvas.addEventListener('mousedown', onMouseDown);
     canvas.addEventListener('mousemove', onMouseMove);
@@ -1768,13 +1386,12 @@ async function init() {
     canvas.addEventListener('wheel', onWheel, {passive: false});
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('dblclick', (e) => {
-        if (mode !== 'spline' && mode !== 'bezier') return;
+        if (mode !== 'spline') return;
         const rect = canvas.getBoundingClientRect();
         const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
         if (hitTest(sx, sy, 16) >= 0) return;
         const [wx, wy] = screenToWorld(sx, sy);
-        if (mode === 'spline') addControlPointNear(wx, wy);
-        else addBezierAnchorNear(wx, wy);
+        addControlPointNear(wx, wy);
     });
     window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
@@ -1798,11 +1415,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
-            html = build_html()
+            body = build_html().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(html.encode())
+            self.wfile.write(body)
         elif parsed.path == "/api/data":
             data = {
                 "mapPng": MAP_PNG_B64,
@@ -1811,9 +1429,10 @@ class Handler(BaseHTTPRequestHandler):
                 "csvPath": os.path.basename(CSV_PATH),
                 "mapYaml": os.path.basename(MAP_YAML_PATH),
             }
-            body = json.dumps(data).encode()
+            body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
         else:
@@ -1907,7 +1526,13 @@ def main():
 
     MAP_PNG_B64 = load_pgm_as_png_base64(pgm_path)
 
-    pgm_w, pgm_h, _, _ = parse_pgm(pgm_path)
+    if HAS_PIL:
+        _img = Image.open(pgm_path)
+        pgm_w, pgm_h = _img.size
+    elif _is_png(pgm_path):
+        pgm_w, pgm_h = parse_png_dimensions(pgm_path)
+    else:
+        pgm_w, pgm_h, _, _ = parse_pgm(pgm_path)
     MAP_META = {
         "resolution": float(meta.get("resolution", 0.05)),
         "origin": meta.get("origin", [0, 0, 0]),
