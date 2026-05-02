@@ -8,6 +8,8 @@ ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
   pure_pursuit/pure_pursuit_node.py
+  pure_pursuit/gap_follow.py
+  pure_pursuit/drive_mux.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

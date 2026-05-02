@@ -23,8 +23,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 @dataclass
 class ControllerConfig:
     # ---------------- Topics / frames ----------------
-    # pose_topic: str = '/pf/pose/odom'     # real-car localization source
-    pose_topic: str = '/ego_racecar/odom'   # sim
+    pose_topic: str = '/pf/pose/odom'     # real-car localization source
+    # pose_topic: str = '/ego_racecar/odom'   # sim
     drive_topic: str = '/drive_pp'
     marker_topic: str = '/pure_pursuit/markers'
     global_frame: str = 'map'
@@ -574,7 +574,7 @@ def main(args=None):
         try:
             from ament_index_python.packages import get_package_share_directory
             share = get_package_share_directory('pure_pursuit')
-            CFG.waypoints_path = os.path.join(share, 'waypoints', 'levine.csv')
+            CFG.waypoints_path = os.path.join(share, 'waypoints', 'race3.csv')
         except Exception:
             pass
 

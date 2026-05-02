@@ -20,6 +20,8 @@ setup(
     entry_points={
         'console_scripts': [
             'pure_pursuit_node = pure_pursuit.pure_pursuit_node:main',
+            'gap_follow = pure_pursuit.gap_follow:main',
+            'drive_mux = pure_pursuit.drive_mux:main',
         ],
     },
 )
